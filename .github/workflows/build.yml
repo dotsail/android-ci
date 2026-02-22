@@ -301,9 +301,9 @@ jobs:
             fi
             # Varioqub ID: varioqubProjectId / VARIOQUB_PROJECT_ID
             if [ -z "$VARIOQUB_ID" ]; then
-              VARIOQUB_ID=$(grep -iE '(varioqubProjectId|VARIOQUB_PROJECT_ID)' "$f" | grep -v 'buildConfigField' | sed 's|//.*||' | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
-              # app/build.gradle hardcoded
-              [ -z "$VARIOQUB_ID" ] && VARIOQUB_ID=$(grep 'VARIOQUB_PROJECT_ID' "$f" | grep 'buildConfigField' | grep -v 'debug\|Debug' | sed 's|//.*||' | grep -oE '"[0-9][^"]*"' | head -1 | tr -d '"') || true
+              VARIOQUB_ID=$(grep -iE '(varioqubProjectId|VARIOQUB_PROJECT_ID)' "$f" | grep -v 'buildConfigField' | sed 's|//.*||' | grep -oE '"[^"]*"' | head -1 | tr -d '"\\'  ) || true
+              # app/build.gradle hardcoded: buildConfigField "String", "VARIOQUB_PROJECT_ID", "\"6254290\""
+              [ -z "$VARIOQUB_ID" ] && VARIOQUB_ID=$(grep 'VARIOQUB_PROJECT_ID' "$f" | grep 'buildConfigField' | grep -v 'debug\|Debug' | sed 's|//.*||' | grep -oE '"[0-9][^"]*"' | head -1 | tr -d '"\\'  ) || true
             fi
           done
 
