@@ -171,17 +171,37 @@ jobs:
 
       - name: Decode Keystore
         if: inputs.build_type != 'debug'
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/${{ inputs.keystore_filename }}
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "❌ Error: KEYSTORE_BASE64 secret is empty or not configured"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/${{ inputs.keystore_filename }}
+          FILE_SIZE=$(wc -c < "app/${{ inputs.keystore_filename }}")
+          echo "✅ Keystore decoded: $FILE_SIZE bytes -> app/${{ inputs.keystore_filename }}"
+          if [ "$FILE_SIZE" -lt 100 ]; then
+            echo "❌ Error: Keystore file too small ($FILE_SIZE bytes), likely corrupted"
+            exit 1
+          fi
 
       - name: Decode secrets.properties
         if: inputs.decode_secrets_properties
-        run: echo "${{ secrets.SECRETS_PROPERTIES_BASE64 }}" | base64 -d > secrets.properties
+        env:
+          SECRETS_B64: ${{ secrets.SECRETS_PROPERTIES_BASE64 }}
+        run: |
+          printf '%s' "$SECRETS_B64" | base64 -d > secrets.properties
+          echo "✅ secrets.properties decoded: $(wc -c < secrets.properties) bytes"
 
       - name: Decode google-services.json
         if: inputs.decode_google_services_json
+        env:
+          GS_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           mkdir -p app/src/prod
-          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 -d > app/src/prod/google-services.json
+          printf '%s' "$GS_B64" | base64 -d > app/src/prod/google-services.json
+          echo "✅ google-services.json decoded: $(wc -c < app/src/prod/google-services.json) bytes"
 
       - name: Print release configuration (pre-build)
         if: inputs.build_type != 'debug'
