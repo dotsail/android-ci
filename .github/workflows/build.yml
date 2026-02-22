@@ -642,80 +642,50 @@ jobs:
 
           if [ -n "$DOWNLOAD_URL" ] && [[ "$DOWNLOAD_URL" == http* ]]; then
             QR_CODE_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${DOWNLOAD_URL}"
-            DOWNLOAD_SECTION="$(cat <<INNER_EOF
-                  {
-                    \"tag\": \"hr\"
-                  },
-                  {
-                    \"tag\": \"div\",
-                    \"text\": {
-                      \"tag\": \"lark_md\",
-                      \"content\": \"**下载链接（1小时有效）**\n[点击查看二维码](${QR_CODE_URL})\"
-                    }
-                  },
-                  {
-                    \"tag\": \"action\",
-                    \"actions\": [
-                      {
-                        \"tag\": \"button\",
-                        \"text\": {
-                          \"tag\": \"plain_text\",
-                          \"content\": \"📥 下载 APK\"
-                        },
-                        \"type\": \"primary\",
-                        \"url\": \"${DOWNLOAD_URL}\"
-                      }
-                    ]
-                  }
-          INNER_EOF
-          )"
+            cat > /tmp/feishu_payload.json << PAYLOAD_EOF
+          {
+            "msg_type": "interactive",
+            "card": {
+              "header": {
+                "title": {"tag": "plain_text", "content": "✅ ${{ inputs.app_name }} 构建成功"},
+                "template": "green"
+              },
+              "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}"}},
+                {"tag": "hr"},
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**下载链接（1小时有效）**\n[点击查看二维码](${QR_CODE_URL})"}},
+                {"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "📥 下载 APK"}, "type": "primary", "url": "${DOWNLOAD_URL}"}]}
+              ]
+            }
+          }
+          PAYLOAD_EOF
           else
-            DOWNLOAD_SECTION="$(cat <<INNER_EOF
-                  {
-                    \"tag\": \"hr\"
-                  },
-                  {
-                    \"tag\": \"div\",
-                    \"text\": {
-                      \"tag\": \"lark_md\",
-                      \"content\": \"**APK 下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts\"
-                    }
-                  }
-          INNER_EOF
-          )"
+            cat > /tmp/feishu_payload.json << PAYLOAD_EOF
+          {
+            "msg_type": "interactive",
+            "card": {
+              "header": {
+                "title": {"tag": "plain_text", "content": "✅ ${{ inputs.app_name }} 构建成功"},
+                "template": "green"
+              },
+              "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}"}},
+                {"tag": "hr"},
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**APK 下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts"}}
+              ]
+            }
+          }
+          PAYLOAD_EOF
           fi
 
-          PAYLOAD="{
-              \"msg_type\": \"interactive\",
-              \"card\": {
-                \"header\": {
-                  \"title\": {
-                    \"tag\": \"plain_text\",
-                    \"content\": \"✅ ${{ inputs.app_name }} 构建成功\"
-                  },
-                  \"template\": \"green\"
-                },
-                \"elements\": [
-                  {
-                    \"tag\": \"div\",
-                    \"text\": {
-                      \"tag\": \"lark_md\",
-                      \"content\": \"**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}\"
-                    }
-                  },
-                  ${DOWNLOAD_SECTION}
-                ]
-              }
-            }"
-
           echo "📤 Sending Feishu notification..."
-          echo "📋 Payload preview (first 500 chars):"
-          echo "$PAYLOAD" | head -c 500
+          echo "📋 Payload preview:"
+          cat /tmp/feishu_payload.json | head -c 500
           echo ""
 
           RESPONSE=$(curl -s -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -d @/tmp/feishu_payload.json)
 
           echo "📨 Feishu API response: $RESPONSE"
 
@@ -726,6 +696,7 @@ jobs:
             echo "❌ Feishu notification failed! StatusCode=$STATUS_CODE"
             echo "Full response: $RESPONSE"
           fi
+          rm -f /tmp/feishu_payload.json
 
       - name: Notify Feishu on failure
         if: failure() && inputs.notify_feishu
@@ -736,45 +707,28 @@ jobs:
             exit 0
           fi
 
+          cat > /tmp/feishu_fail.json << PAYLOAD_EOF
+          {
+            "msg_type": "interactive",
+            "card": {
+              "header": {
+                "title": {"tag": "plain_text", "content": "❌ ${{ inputs.app_name }} 构建失败"},
+                "template": "red"
+              },
+              "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**构建信息**\n• 分支: ${{ github.ref_name }}\n• 提交: ${{ github.sha }}\n• 触发者: ${{ github.actor }}"}},
+                {"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "🔍 查看详情"}, "type": "default", "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}]}
+              ]
+            }
+          }
+          PAYLOAD_EOF
+
           RESPONSE=$(curl -s -X POST "$FEISHU_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"msg_type\": \"interactive\",
-              \"card\": {
-                \"header\": {
-                  \"title\": {
-                    \"tag\": \"plain_text\",
-                    \"content\": \"❌ ${{ inputs.app_name }} 构建失败\"
-                  },
-                  \"template\": \"red\"
-                },
-                \"elements\": [
-                  {
-                    \"tag\": \"div\",
-                    \"text\": {
-                      \"tag\": \"lark_md\",
-                      \"content\": \"**构建信息**\n• 分支: ${{ github.ref_name }}\n• 提交: ${{ github.sha }}\n• 触发者: ${{ github.actor }}\"
-                    }
-                  },
-                  {
-                    \"tag\": \"action\",
-                    \"actions\": [
-                      {
-                        \"tag\": \"button\",
-                        \"text\": {
-                          \"tag\": \"plain_text\",
-                          \"content\": \"🔍 查看详情\"
-                        },
-                        \"type\": \"default\",
-                        \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }")
+            -d @/tmp/feishu_fail.json)
 
           echo "📨 Feishu API response: $RESPONSE"
+          rm -f /tmp/feishu_fail.json
 
       - name: Clean up secrets
         if: always()
