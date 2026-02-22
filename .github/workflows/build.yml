@@ -284,37 +284,40 @@ jobs:
           for f in $SEARCH_FILES; do
             # Adjust token: appToken/adjustAppToken/ADJUST_APP_TOKEN
             if [ -z "$ADJUST_TOKEN" ]; then
-              ADJUST_TOKEN=$(grep -E '(appToken|adjustAppToken|ADJUST_APP_TOKEN)' "$f" | grep -v '//' | grep -v 'debug\|Debug\|sandbox' | grep -oE '[a-z0-9]{10,14}' | head -1) || true
-              # Fallback: also match "value" format
-              [ -z "$ADJUST_TOKEN" ] && ADJUST_TOKEN=$(grep -E '(appToken|adjustAppToken|ADJUST_APP_TOKEN)' "$f" | grep -v '//' | head -1 | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
+              ADJUST_TOKEN=$(grep -E '(appToken|adjustAppToken|ADJUST_APP_TOKEN)' "$f" | grep -v 'buildConfigField' | grep -v 'debug\|Debug\|sandbox' | sed 's|//.*||' | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
+              # secrets.properties format: KEY=value (no quotes)
+              [ -z "$ADJUST_TOKEN" ] && ADJUST_TOKEN=$(grep -E '^ADJUST_APP_TOKEN=' "$f" | head -1 | cut -d= -f2) || true
             fi
             # AppMetrica key: apiKey (in appMetrica context) / appmetricaApiKey / APPMETRICA_API_KEY
             if [ -z "$APPMETRICA_KEY" ]; then
-              APPMETRICA_KEY=$(grep -iE '(appmetrica.*apiKey|appmetricaApiKey|APPMETRICA_API_KEY)' "$f" | grep -v '//' | head -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) || true
+              APPMETRICA_KEY=$(grep -iE '(appmetrica.*apiKey|appmetricaApiKey|APPMETRICA_API_KEY)' "$f" | grep -v 'buildConfigField' | sed 's|//.*||' | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) || true
             fi
             # Amplitude key: amplitudeApiKey / AMPLITUDE_API_KEY
             if [ -z "$AMPLITUDE_KEY" ]; then
-              AMPLITUDE_KEY=$(grep -iE '(amplitudeApiKey|AMPLITUDE_API_KEY)' "$f" | grep -v '//' | head -1 | grep -oE '[0-9a-f]{20,}' | head -1) || true
+              # config.gradle or secrets.properties
+              AMPLITUDE_KEY=$(grep -iE '(amplitudeApiKey|AMPLITUDE_API_KEY)' "$f" | grep -v 'buildConfigField' | sed 's|//.*||' | grep -oE '[0-9a-f]{20,}' | head -1) || true
+              # app/build.gradle hardcoded: buildConfigField "String", "AMPLITUDE_API_KEY", "\"value\""
+              [ -z "$AMPLITUDE_KEY" ] && AMPLITUDE_KEY=$(grep 'AMPLITUDE_API_KEY' "$f" | grep 'buildConfigField' | grep -v 'debug\|Debug' | sed 's|//.*||' | grep -oE '[0-9a-f]{20,}' | head -1) || true
             fi
             # Varioqub ID: varioqubProjectId / VARIOQUB_PROJECT_ID
             if [ -z "$VARIOQUB_ID" ]; then
-              VARIOQUB_ID=$(grep -iE '(varioqubProjectId|VARIOQUB_PROJECT_ID)' "$f" | grep -v '//' | head -1 | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
+              VARIOQUB_ID=$(grep -iE '(varioqubProjectId|VARIOQUB_PROJECT_ID)' "$f" | grep -v 'buildConfigField' | sed 's|//.*||' | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
+              # app/build.gradle hardcoded
+              [ -z "$VARIOQUB_ID" ] && VARIOQUB_ID=$(grep 'VARIOQUB_PROJECT_ID' "$f" | grep 'buildConfigField' | grep -v 'debug\|Debug' | sed 's|//.*||' | grep -oE '"[0-9][^"]*"' | head -1 | tr -d '"') || true
             fi
           done
 
-          # AppMetrica: also check apiKey inside appMetrica block in config.gradle
+          # Fallback: check adjust/appMetrica blocks in config.gradle via awk
+          if [ -z "$ADJUST_TOKEN" ]; then
+            for f in $SEARCH_FILES; do
+              ADJUST_TOKEN=$(awk '/adjust.*=.*\[/,/\]/' "$f" 2>/dev/null | grep 'appToken' | sed 's|//.*||' | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
+              [ -n "$ADJUST_TOKEN" ] && break
+            done
+          fi
           if [ -z "$APPMETRICA_KEY" ]; then
             for f in $SEARCH_FILES; do
               APPMETRICA_KEY=$(awk '/appMetrica.*=.*\[/,/\]/' "$f" 2>/dev/null | grep 'apiKey' | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) || true
               [ -n "$APPMETRICA_KEY" ] && break
-            done
-          fi
-
-          # Adjust: also check adjust block in config.gradle
-          if [ -z "$ADJUST_TOKEN" ]; then
-            for f in $SEARCH_FILES; do
-              ADJUST_TOKEN=$(awk '/adjust.*=.*\[/,/\]/' "$f" 2>/dev/null | grep 'appToken' | grep -oE '"[^"]*"' | head -1 | tr -d '"') || true
-              [ -n "$ADJUST_TOKEN" ] && break
             done
           fi
 
