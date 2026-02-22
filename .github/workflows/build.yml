@@ -1,0 +1,770 @@
+name: Android CI/CD (Shared)
+
+on:
+  workflow_call:
+    inputs:
+      # ==================== 项目配置 ====================
+      app_name:
+        description: '应用名称'
+        type: string
+        required: true
+      build_flavor:
+        description: '构建变体: release (单flavor) 或 prodRelease (多flavor)'
+        type: string
+        required: true
+      config_path:
+        description: '配置文件路径 (用于提取版本号)'
+        type: string
+        required: true
+      config_block:
+        description: 'awk 模式匹配配置块 (空=直接grep)'
+        type: string
+        required: false
+        default: ''
+      ad_config_name:
+        description: '广告配置文件名: boost_config 或 lum.config'
+        type: string
+        required: true
+      keystore_filename:
+        description: 'Keystore 文件名'
+        type: string
+        required: false
+        default: 'release-keystore.jks'
+      has_maven_credentials:
+        description: '是否需要 Maven 凭证'
+        type: boolean
+        required: false
+        default: false
+      decode_secrets_properties:
+        description: '是否解码 secrets.properties'
+        type: boolean
+        required: false
+        default: false
+      decode_google_services_json:
+        description: '是否解码 google-services.json'
+        type: boolean
+        required: false
+        default: false
+      # ==================== 运行时参数 ====================
+      build_type:
+        description: '构建类型'
+        type: string
+        required: true
+      create_release:
+        description: '创建 GitHub Release'
+        type: boolean
+        required: false
+        default: true
+      notify_feishu:
+        description: '发送飞书通知'
+        type: boolean
+        required: false
+        default: true
+      also_build_apk:
+        description: '同时构建 APK'
+        type: boolean
+        required: false
+        default: false
+      upload_debug_artifact:
+        description: '上传 Debug 产物'
+        type: boolean
+        required: false
+        default: false
+      publish_to_play_store:
+        description: '发布到 Google Play'
+        type: boolean
+        required: false
+        default: false
+      play_store_track:
+        description: '发布轨道'
+        type: string
+        required: false
+        default: 'internal'
+      rollout_percentage:
+        description: '灰度百分比'
+        type: string
+        required: false
+        default: '20'
+      custom_rollout_percentage:
+        description: '自定义灰度百分比'
+        type: string
+        required: false
+        default: ''
+      previous_version_action:
+        description: '上一版本处理'
+        type: string
+        required: false
+        default: 'complete'
+
+env:
+  JAVA_VERSION: '17'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive build configuration
+        id: config
+        run: |
+          FLAVOR="${{ inputs.build_flavor }}"
+          APP="${{ inputs.app_name }}"
+          if [ "$FLAVOR" = "release" ]; then
+            echo "debug_task=assembleDebug" >> $GITHUB_OUTPUT
+            echo "release_task=assembleRelease" >> $GITHUB_OUTPUT
+            echo "aab_task=bundleRelease" >> $GITHUB_OUTPUT
+            echo "debug_apk=app/build/outputs/apk/debug/app-debug.apk" >> $GITHUB_OUTPUT
+            echo "release_apk=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_OUTPUT
+            echo "aab_path=app/build/outputs/bundle/release/*.aab" >> $GITHUB_OUTPUT
+            echo "manifest_dir=release/processReleaseMainManifest" >> $GITHUB_OUTPUT
+            echo "assets_dir=release/mergeReleaseAssets" >> $GITHUB_OUTPUT
+          else
+            echo "debug_task=assembleDevDebug" >> $GITHUB_OUTPUT
+            echo "release_task=assembleProdRelease" >> $GITHUB_OUTPUT
+            echo "aab_task=bundleProdRelease" >> $GITHUB_OUTPUT
+            echo "debug_apk=app/build/outputs/apk/dev/debug/${APP}-dev-debug.apk" >> $GITHUB_OUTPUT
+            echo "release_apk=app/build/outputs/apk/prod/release/${APP}-prod-release.apk" >> $GITHUB_OUTPUT
+            echo "aab_path=app/build/outputs/bundle/prodRelease/*.aab" >> $GITHUB_OUTPUT
+            echo "manifest_dir=prodRelease/processProdReleaseMainManifest" >> $GITHUB_OUTPUT
+            echo "assets_dir=prodRelease/mergeProdReleaseAssets" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Cleanup old artifacts (keep latest 3)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 清理旧的 artifacts，保留最新 3 个..."
+          for ARTIFACT_NAME in "release-apk" "release-aab" "debug-apk"; do
+            echo "📦 处理 $ARTIFACT_NAME..."
+            ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/artifacts \
+              --jq ".artifacts | map(select(.name == \"$ARTIFACT_NAME\")) | sort_by(.created_at) | reverse | .[3:] | .[].id")
+            if [ -z "$ARTIFACTS" ]; then
+              echo "  ✅ $ARTIFACT_NAME 无需清理"
+            else
+              for id in $ARTIFACTS; do
+                echo "  🗑️ 删除 $ARTIFACT_NAME artifact $id"
+                gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true
+              done
+            fi
+          done
+          echo "✅ 清理完成"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Decode Keystore
+        if: inputs.build_type != 'debug'
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/${{ inputs.keystore_filename }}
+
+      - name: Decode secrets.properties
+        if: inputs.decode_secrets_properties
+        run: echo "${{ secrets.SECRETS_PROPERTIES_BASE64 }}" | base64 -d > secrets.properties
+
+      - name: Decode google-services.json
+        if: inputs.decode_google_services_json
+        run: |
+          mkdir -p app/src/prod
+          echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 -d > app/src/prod/google-services.json
+
+      - name: Print release configuration (pre-build)
+        if: inputs.build_type != 'debug'
+        run: |
+          CONFIG="${{ inputs.config_path }}"
+          BLOCK="${{ inputs.config_block }}"
+
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║              📋 Release Configuration Summary               ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          echo "┌─── 📦 基础信息 ───────────────────────────────────────────────"
+          if [ -n "$BLOCK" ]; then
+            echo "│ Application ID:  $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'applicationId' | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
+            echo "│ Version Name:    $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'versionName' | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
+            echo "│ Version Code:    $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'versionCode' | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/' || echo 'N/A')"
+          else
+            echo "│ Application ID:  $(grep 'applicationId' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
+            echo "│ Version Name:    $(grep 'versionName' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
+            echo "│ Version Code:    $(grep 'versionCode' "$CONFIG" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/' || echo 'N/A')"
+          fi
+          echo "└──────────────────────────────────────────────────────────────"
+          echo ""
+
+          # Firebase config (search common paths)
+          GOOGLE_SERVICES=""
+          for path in "app/src/release/google-services.json" "app/src/prod/google-services.json" "app/google-services.json"; do
+            if [ -f "$path" ]; then GOOGLE_SERVICES="$path"; break; fi
+          done
+
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            echo "┌─── 🔥 Firebase 配置 ─────────────────────────────────────────"
+            echo "│ Source:          $GOOGLE_SERVICES"
+            echo "│ Project ID:      $(grep -o '"project_id": "[^"]*"' "$GOOGLE_SERVICES" | head -1 | sed 's/.*"\([^"]*\)"/\1/' || echo 'N/A')"
+            echo "│ Package Name:    $(grep -o '"package_name": "[^"]*"' "$GOOGLE_SERVICES" | head -1 | sed 's/.*"\([^"]*\)"/\1/' || echo 'N/A')"
+            echo "└──────────────────────────────────────────────────────────────"
+          fi
+          echo ""
+          echo "✅ 源码配置核查完成"
+          echo "ℹ️ 广告聚合平台详细配置将在构建后从 ${{ inputs.ad_config_name }} 解密输出"
+
+      - name: Build Debug APK
+        if: inputs.build_type == 'debug' || inputs.build_type == 'both'
+        env:
+          ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        run: ./gradlew ${{ steps.config.outputs.debug_task }}
+
+      - name: Build Release APK
+        if: |
+          (inputs.build_type == 'release' || inputs.build_type == 'both' || inputs.build_type == '') &&
+          inputs.build_type != 'aab' &&
+          (!inputs.publish_to_play_store || inputs.also_build_apk)
+        env:
+          KEYSTORE_FILE: ${{ inputs.keystore_filename }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        run: ./gradlew ${{ steps.config.outputs.release_task }}
+
+      - name: Build Release AAB (for Google Play)
+        if: inputs.publish_to_play_store || inputs.build_type == 'aab'
+        env:
+          KEYSTORE_FILE: ${{ inputs.keystore_filename }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        run: ./gradlew ${{ steps.config.outputs.aab_task }}
+
+      - name: Get version info
+        id: version
+        run: |
+          CONFIG="${{ inputs.config_path }}"
+          BLOCK="${{ inputs.config_block }}"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "❌ Error: $CONFIG not found"
+            exit 1
+          fi
+
+          if [ -n "$BLOCK" ]; then
+            VERSION_NAME=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "versionName" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            VERSION_CODE=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "versionCode" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+            PACKAGE_NAME=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "applicationId" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          else
+            VERSION_NAME=$(grep "versionName" "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            VERSION_CODE=$(grep "versionCode" "$CONFIG" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+            PACKAGE_NAME=$(grep "applicationId" "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ] || [ -z "$PACKAGE_NAME" ]; then
+            echo "❌ Error: Failed to extract version info from $CONFIG"
+            exit 1
+          fi
+
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "build_time=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          echo "package_name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+
+          echo "✅ Version Name: $VERSION_NAME"
+          echo "✅ Version Code: $VERSION_CODE"
+          echo "📦 Package Name: $PACKAGE_NAME"
+
+      - name: Print ad configuration (post-build)
+        if: inputs.build_type != 'debug'
+        run: |
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║         📺 Ad Configuration (${{ inputs.ad_config_name }})              ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          # AdMob App ID from merged manifest
+          MANIFEST_FILE="app/build/intermediates/merged_manifest/${{ steps.config.outputs.manifest_dir }}/AndroidManifest.xml"
+          echo "┌─── 🏷️ AdMob App ID (AndroidManifest.xml) ─────────────────────"
+          if [ -f "$MANIFEST_FILE" ]; then
+            ADMOB_APP_ID=$(grep -A1 'com.google.android.gms.ads.APPLICATION_ID' "$MANIFEST_FILE" | grep 'android:value' | sed 's/.*"\(.*\)".*/\1/')
+            echo "│ AdMob App ID:    $ADMOB_APP_ID"
+          else
+            echo "│ ⚠️ merged AndroidManifest.xml 不存在"
+          fi
+          echo "└──────────────────────────────────────────────────────────────"
+          echo ""
+
+          # Decrypt ad config (AES-256-CBC, same key/IV for both boost_config and lum.config)
+          AD_KEY="6ebd5bacec777becb70c4a04b9ff68e3229e6f71f3a4ca40932f53548d402fe4"
+          AD_IV="3f20787529787aec5a472f07b0ef4bea"
+          AD_FILE="app/build/intermediates/assets/${{ steps.config.outputs.assets_dir }}/${{ inputs.ad_config_name }}"
+
+          if [ -f "$AD_FILE" ]; then
+            DECRYPTED=$(base64 -d "$AD_FILE" | openssl enc -d -aes-256-cbc -K "$AD_KEY" -iv "$AD_IV" 2>/dev/null) || true
+
+            if [ -n "$DECRYPTED" ]; then
+              # Try to extract ad scene names from config for cross-validation
+              GRADLE_SCENES=""
+              for f in "${{ inputs.config_path }}" "config.gradle" "config/config.gradle"; do
+                if [ -f "$f" ]; then
+                  GRADLE_SCENES=$(awk '/adScenes.*=.*\[/,/\]/' "$f" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' | sort) || true
+                  if [ -n "$GRADLE_SCENES" ]; then break; fi
+                fi
+              done
+              export GRADLE_SCENES="${GRADLE_SCENES:-}"
+
+              cat << 'PYEOF' > /tmp/ad_parser.py
+          import json, sys, os
+
+          config = json.load(sys.stdin)
+
+          print('┌─── 📱 广告聚合平台 (v' + config.get('version', '?') + ') ────────────────')
+          print('│ Global Switch:   ' + str(config.get('switch', '?')))
+          print('│')
+
+          networks = config.get('networks', {})
+
+          admob = networks.get('admob', {})
+          print('│ [AdMob]          network_id=' + str(admob.get('id', '?')))
+
+          topon = networks.get('topOn', {})
+          print('│ [TopOn]          network_id=' + str(topon.get('id', '?')))
+          print('│   App ID:        ' + topon.get('app_id', '未配置'))
+          print('│   App Key:       ' + topon.get('app_key', '未配置'))
+
+          maxn = networks.get('max', {})
+          sdk_key = maxn.get('applovin_sdk_key', '')
+          print('│ [MAX/AppLovin]   network_id=' + str(maxn.get('id', '?')))
+          if sdk_key:
+              print('│   SDK Key:       ' + sdk_key[:20] + '...' + sdk_key[-10:] + ' (' + str(len(sdk_key)) + ' chars)')
+          else:
+              print('│   SDK Key:       未配置')
+
+          adx = networks.get('adx', {})
+          if adx:
+              print('│ [ADX]            network_id=' + str(adx.get('id', '?')))
+              print('│   App ID:        ' + adx.get('app_id', '未配置'))
+
+          print('└──────────────────────────────────────────────────────────────')
+          print()
+
+          print('┌─── 📺 广告场景 ↔ 广告单元 ID ────────────────')
+
+          strategies = {}
+          for s in (config.get('strategies') or []):
+              sid = s['id']
+              strategies[int(sid) if isinstance(sid, str) else sid] = s
+
+          network_names = {2: 'AdMob', 5: 'MAX', 26: 'TopOn', 66: 'ADX'}
+          ad_type_names = {1: '插屏', 2: '激励', 3: '原生', 4: '开屏', 5: 'Banner'}
+
+          for scene in (config.get('scenes') or []):
+              name = scene['name']
+              sid = scene['strategy_id']
+              switch = '✅' if scene.get('switch', 1) == 1 else '❌'
+              ad_type = ad_type_names.get(scene.get('ad_type', 0), str(scene.get('ad_type', '?')))
+              bidding = '竞价' if scene.get('enable_client_bidding', False) else '瀑布流'
+              print(f'│ {switch} {name}')
+              print(f'│   类型: {ad_type}  |  模式: {bidding}  |  策略ID: {sid}')
+              strategy = strategies.get(sid)
+              if strategy:
+                  for unit in strategy.get('ad_units', []):
+                      net = network_names.get(unit.get('network', 0), 'N' + str(unit.get('network', '?')))
+                      print(f'│   → [{net}] {unit["id"]}')
+              else:
+                  print(f'│   → ⚠️ 策略 {sid} 未找到')
+
+          print('└──────────────────────────────────────────────────────────────')
+          print()
+
+          ad_scenes = set(s['name'] for s in (config.get('scenes') or []))
+          gradle_scenes_str = os.environ.get('GRADLE_SCENES', '').strip()
+          gradle_scenes = set(gradle_scenes_str.split('\n')) if gradle_scenes_str else set()
+
+          if gradle_scenes:
+              print('┌─── 🔍 广告场景交叉校验 ─────────────────────────────────────')
+              missing = gradle_scenes - ad_scenes
+              extra = ad_scenes - gradle_scenes
+              if not missing and not extra:
+                  print('│ ✅ config 和广告配置场景完全匹配')
+              else:
+                  if missing:
+                      for s in sorted(missing):
+                          print(f'│ ⚠️ config 中有但广告配置中缺失: {s}')
+                  if extra:
+                      for s in sorted(extra):
+                          print(f'│ ℹ️ 广告配置中有但 config 中未定义: {s}')
+              print('└──────────────────────────────────────────────────────────────')
+          PYEOF
+              echo "$DECRYPTED" | python3 /tmp/ad_parser.py
+            else
+              echo "┌─── 📱 广告聚合平台 ──────────────────────────────────────────"
+              echo "│ ⚠️ ${{ inputs.ad_config_name }} 解密失败"
+              echo "└──────────────────────────────────────────────────────────────"
+            fi
+          else
+            echo "┌─── 📱 广告聚合平台 ──────────────────────────────────────────"
+            echo "│ ⚠️ ${{ inputs.ad_config_name }} 文件不存在 (需要 release/aab 构建)"
+            echo "└──────────────────────────────────────────────────────────────"
+          fi
+
+          echo ""
+          echo "✅ 广告配置核查完成"
+
+      - name: Generate Changelog
+        id: changelog
+        if: inputs.publish_to_play_store && inputs.play_store_track == 'production'
+        run: |
+          chmod +x scripts/generate-changelog.sh
+          ./scripts/generate-changelog.sh --dry-run
+
+      - name: Rename APK files
+        if: (!inputs.publish_to_play_store || inputs.also_build_apk) || inputs.build_type == 'debug' || inputs.build_type == 'both'
+        run: |
+          mkdir -p artifacts
+          if [ -f "${{ steps.config.outputs.debug_apk }}" ]; then
+            cp "${{ steps.config.outputs.debug_apk }}" "artifacts/${{ inputs.app_name }}-v${{ steps.version.outputs.version_name }}-debug.apk"
+          fi
+          if [ -f "${{ steps.config.outputs.release_apk }}" ]; then
+            cp "${{ steps.config.outputs.release_apk }}" "artifacts/${{ inputs.app_name }}-v${{ steps.version.outputs.version_name }}-release.apk"
+          fi
+
+      - name: Upload Debug APK artifact
+        if: inputs.upload_debug_artifact && (inputs.build_type == 'debug' || inputs.build_type == 'both')
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: debug-apk
+          path: artifacts/*-debug.apk
+          if-no-files-found: ignore
+
+      - name: Upload Release APK artifact
+        if: !inputs.publish_to_play_store || inputs.also_build_apk
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-apk
+          path: artifacts/*-release.apk
+          if-no-files-found: ignore
+
+      - name: Upload Release AAB artifact
+        if: inputs.publish_to_play_store || inputs.build_type == 'aab'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-aab
+          path: ${{ steps.config.outputs.aab_path }}
+          if-no-files-found: warn
+
+      - name: Create Stable Tag
+        if: inputs.publish_to_play_store && inputs.play_store_track == 'production'
+        run: |
+          VERSION="v${{ steps.version.outputs.version_name }}"
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "⚠️ Tag $VERSION 已存在，跳过创建"
+          else
+            echo "📌 创建正式 Tag: $VERSION"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "$VERSION"
+            echo "✅ Tag $VERSION 创建成功"
+          fi
+
+      - name: Create Release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ (inputs.publish_to_play_store && inputs.play_store_track == 'production') && format('v{0}', steps.version.outputs.version_name) || format('v{0}-{1}', steps.version.outputs.version_name, steps.version.outputs.build_time) }}
+          name: Release v${{ steps.version.outputs.version_name }}
+          body: |
+            ## ${{ inputs.app_name }} v${{ steps.version.outputs.version_name }}
+
+            **版本信息**
+            - Version Name: ${{ steps.version.outputs.version_name }}
+            - Version Code: ${{ steps.version.outputs.version_code }}
+            - Build Time: ${{ steps.version.outputs.build_time }}
+
+            ## 下载
+
+            点击下方 Assets 中的 APK 文件下载安装。
+          files: artifacts/*.apk
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate rollout settings
+        id: rollout
+        if: inputs.publish_to_play_store
+        run: |
+          TRACK="${{ inputs.play_store_track }}"
+          CUSTOM_PERCENTAGE="${{ inputs.custom_rollout_percentage }}"
+          CHOICE_PERCENTAGE="${{ inputs.rollout_percentage }}"
+
+          if [ -n "$CUSTOM_PERCENTAGE" ]; then
+            PERCENTAGE="$CUSTOM_PERCENTAGE"
+            echo "📝 使用自定义灰度百分比: ${PERCENTAGE}%"
+          else
+            PERCENTAGE="$CHOICE_PERCENTAGE"
+            echo "📝 使用预设灰度百分比: ${PERCENTAGE}%"
+          fi
+
+          if ! [[ "$PERCENTAGE" =~ ^[0-9]+$ ]] || [ "$PERCENTAGE" -lt 1 ] || [ "$PERCENTAGE" -gt 100 ]; then
+            echo "❌ Error: 灰度百分比必须是 1-100 之间的整数，当前值: $PERCENTAGE"
+            exit 1
+          fi
+
+          if [ "$TRACK" = "production" ]; then
+            echo "⚠️ =================================="
+            echo "⚠️ 警告: 正在发布到 PRODUCTION 轨道!"
+            echo "⚠️ =================================="
+          fi
+
+          echo "📋 发布配置:"
+          echo "   轨道: $TRACK"
+          echo "   灰度: ${PERCENTAGE}%"
+          echo "   上一版本: ${{ inputs.previous_version_action }}"
+
+          if [ "$PERCENTAGE" = "100" ]; then
+            echo "fraction=" >> $GITHUB_OUTPUT
+            echo "status=completed" >> $GITHUB_OUTPUT
+            echo "📊 发布设置: 100% 全量发布"
+          else
+            FRACTION=$(awk "BEGIN {printf \"%.2f\", $PERCENTAGE / 100}")
+            echo "fraction=$FRACTION" >> $GITHUB_OUTPUT
+            echo "status=inProgress" >> $GITHUB_OUTPUT
+            echo "📊 发布设置: ${PERCENTAGE}% 灰度发布 (userFraction: $FRACTION)"
+          fi
+
+      - name: Handle previous version
+        if: inputs.publish_to_play_store && inputs.previous_version_action != 'keep'
+        continue-on-error: true
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          chmod +x scripts/manage-previous-release.sh
+          ./scripts/manage-previous-release.sh \
+            "${{ steps.version.outputs.package_name }}" \
+            "${{ inputs.play_store_track }}" \
+            "${{ inputs.previous_version_action }}" \
+            "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"
+
+      - name: Upload to Google Play
+        if: inputs.publish_to_play_store
+        continue-on-error: true
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ steps.version.outputs.package_name }}
+          releaseFiles: ${{ steps.config.outputs.aab_path }}
+          track: ${{ inputs.play_store_track }}
+          status: ${{ steps.rollout.outputs.status }}
+          userFraction: ${{ steps.rollout.outputs.fraction }}
+          whatsNewDirectory: distribution/whatsnew
+
+      - name: Upload APK to file hosting
+        id: upload
+        if: always() && !cancelled()
+        run: |
+          APK_FILE="artifacts/${{ inputs.app_name }}-v${{ steps.version.outputs.version_name }}-release.apk"
+          if [ -f "$APK_FILE" ]; then
+            for i in 1 2 3; do
+              echo "📤 上传尝试 $i/3..."
+              RESPONSE=$(curl --connect-timeout 30 --max-time 300 -F "file=@${APK_FILE}" https://tmpfiles.org/api/v1/upload 2>/dev/null)
+              RAW_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+              if [ -n "$RAW_URL" ]; then
+                DOWNLOAD_URL=$(echo "$RAW_URL" | sed 's|tmpfiles.org/|tmpfiles.org/dl/|')
+                echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+                echo "✅ APK uploaded: $DOWNLOAD_URL"
+                break
+              fi
+              if [ $i -lt 3 ]; then
+                echo "⚠️ 上传失败，10秒后重试..."
+                sleep 10
+              fi
+            done
+            if [ -z "$DOWNLOAD_URL" ] || [[ "$DOWNLOAD_URL" != http* ]]; then
+              echo "⚠️ Failed to upload APK after 3 attempts"
+              echo "download_url=" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "⚠️ APK file not found"
+            echo "download_url=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify Feishu
+        if: always() && !cancelled() && !failure() && inputs.notify_feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            echo "⚠️ FEISHU_WEBHOOK not configured, skipping notification"
+            exit 0
+          fi
+
+          DOWNLOAD_URL="${{ steps.upload.outputs.download_url }}"
+          VERSION_NAME="${{ steps.version.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version.outputs.version_code }}"
+          BUILD_TIME="${{ steps.version.outputs.build_time }}"
+
+          if [ -n "$DOWNLOAD_URL" ] && [[ "$DOWNLOAD_URL" == http* ]]; then
+            QR_CODE_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${DOWNLOAD_URL}"
+            DOWNLOAD_SECTION="$(cat <<INNER_EOF
+                  {
+                    \"tag\": \"hr\"
+                  },
+                  {
+                    \"tag\": \"div\",
+                    \"text\": {
+                      \"tag\": \"lark_md\",
+                      \"content\": \"**下载链接（1小时有效）**\n[点击查看二维码](${QR_CODE_URL})\"
+                    }
+                  },
+                  {
+                    \"tag\": \"action\",
+                    \"actions\": [
+                      {
+                        \"tag\": \"button\",
+                        \"text\": {
+                          \"tag\": \"plain_text\",
+                          \"content\": \"📥 下载 APK\"
+                        },
+                        \"type\": \"primary\",
+                        \"url\": \"${DOWNLOAD_URL}\"
+                      }
+                    ]
+                  }
+          INNER_EOF
+          )"
+          else
+            DOWNLOAD_SECTION="$(cat <<INNER_EOF
+                  {
+                    \"tag\": \"hr\"
+                  },
+                  {
+                    \"tag\": \"div\",
+                    \"text\": {
+                      \"tag\": \"lark_md\",
+                      \"content\": \"**APK 下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts\"
+                    }
+                  }
+          INNER_EOF
+          )"
+          fi
+
+          PAYLOAD="{
+              \"msg_type\": \"interactive\",
+              \"card\": {
+                \"header\": {
+                  \"title\": {
+                    \"tag\": \"plain_text\",
+                    \"content\": \"✅ ${{ inputs.app_name }} 构建成功\"
+                  },
+                  \"template\": \"green\"
+                },
+                \"elements\": [
+                  {
+                    \"tag\": \"div\",
+                    \"text\": {
+                      \"tag\": \"lark_md\",
+                      \"content\": \"**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}\"
+                    }
+                  },
+                  ${DOWNLOAD_SECTION}
+                ]
+              }
+            }"
+
+          echo "📤 Sending Feishu notification..."
+          echo "📋 Payload preview (first 500 chars):"
+          echo "$PAYLOAD" | head -c 500
+          echo ""
+
+          RESPONSE=$(curl -s -X POST "$FEISHU_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "📨 Feishu API response: $RESPONSE"
+
+          STATUS_CODE=$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('StatusCode', d.get('code', -1)))" 2>/dev/null || echo "-1")
+          if [ "$STATUS_CODE" = "0" ]; then
+            echo "✅ Feishu notification sent successfully"
+          else
+            echo "❌ Feishu notification failed! StatusCode=$STATUS_CODE"
+            echo "Full response: $RESPONSE"
+          fi
+
+      - name: Notify Feishu on failure
+        if: failure() && inputs.notify_feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            exit 0
+          fi
+
+          RESPONSE=$(curl -s -X POST "$FEISHU_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"msg_type\": \"interactive\",
+              \"card\": {
+                \"header\": {
+                  \"title\": {
+                    \"tag\": \"plain_text\",
+                    \"content\": \"❌ ${{ inputs.app_name }} 构建失败\"
+                  },
+                  \"template\": \"red\"
+                },
+                \"elements\": [
+                  {
+                    \"tag\": \"div\",
+                    \"text\": {
+                      \"tag\": \"lark_md\",
+                      \"content\": \"**构建信息**\n• 分支: ${{ github.ref_name }}\n• 提交: ${{ github.sha }}\n• 触发者: ${{ github.actor }}\"
+                    }
+                  },
+                  {
+                    \"tag\": \"action\",
+                    \"actions\": [
+                      {
+                        \"tag\": \"button\",
+                        \"text\": {
+                          \"tag\": \"plain_text\",
+                          \"content\": \"🔍 查看详情\"
+                        },
+                        \"type\": \"default\",
+                        \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }")
+
+          echo "📨 Feishu API response: $RESPONSE"
+
+      - name: Clean up secrets
+        if: always()
+        run: |
+          rm -f "app/${{ inputs.keystore_filename }}"
+          ${{ inputs.decode_secrets_properties && 'rm -f secrets.properties' || 'true' }}
+          ${{ inputs.decode_google_services_json && 'rm -f app/src/prod/google-services.json' || 'true' }}
