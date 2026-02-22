@@ -195,15 +195,21 @@ jobs:
           echo ""
 
           echo "┌─── 📦 基础信息 ───────────────────────────────────────────────"
+          APP_ID=""
+          VER_NAME=""
+          VER_CODE=""
           if [ -n "$BLOCK" ]; then
-            echo "│ Application ID:  $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'applicationId' | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
-            echo "│ Version Name:    $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'versionName' | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
-            echo "│ Version Code:    $(awk "/$BLOCK/,/\]/" "$CONFIG" | grep 'versionCode' | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/' || echo 'N/A')"
-          else
-            echo "│ Application ID:  $(grep 'applicationId' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
-            echo "│ Version Name:    $(grep 'versionName' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')"
-            echo "│ Version Code:    $(grep 'versionCode' "$CONFIG" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/' || echo 'N/A')"
+            BLOCK_TEXT=$(awk "/$BLOCK/,/\]/" "$CONFIG")
+            APP_ID=$(echo "$BLOCK_TEXT" | grep 'applicationId' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            VER_NAME=$(echo "$BLOCK_TEXT" | grep 'versionName' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            VER_CODE=$(echo "$BLOCK_TEXT" | grep 'versionCode' | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
           fi
+          [ -z "$APP_ID" ] && APP_ID=$(grep 'applicationId' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')
+          [ -z "$VER_NAME" ] && VER_NAME=$(grep 'versionName' "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo 'N/A')
+          [ -z "$VER_CODE" ] && VER_CODE=$(grep 'versionCode' "$CONFIG" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/' || echo 'N/A')
+          echo "│ Application ID:  $APP_ID"
+          echo "│ Version Name:    $VER_NAME"
+          echo "│ Version Code:    $VER_CODE"
           echo "└──────────────────────────────────────────────────────────────"
           echo ""
 
@@ -268,12 +274,20 @@ jobs:
           fi
 
           if [ -n "$BLOCK" ]; then
-            VERSION_NAME=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "versionName" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            VERSION_CODE=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "versionCode" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
-            PACKAGE_NAME=$(awk "/$BLOCK/,/\]/" "$CONFIG" | grep "applicationId" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          else
+            BLOCK_TEXT=$(awk "/$BLOCK/,/\]/" "$CONFIG")
+            VERSION_NAME=$(echo "$BLOCK_TEXT" | grep "versionName" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            VERSION_CODE=$(echo "$BLOCK_TEXT" | grep "versionCode" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+            PACKAGE_NAME=$(echo "$BLOCK_TEXT" | grep "applicationId" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+
+          # Fallback to global grep if block extraction missed any field
+          if [ -z "$VERSION_NAME" ]; then
             VERSION_NAME=$(grep "versionName" "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+          if [ -z "$VERSION_CODE" ]; then
             VERSION_CODE=$(grep "versionCode" "$CONFIG" | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')
+          fi
+          if [ -z "$PACKAGE_NAME" ]; then
             PACKAGE_NAME=$(grep "applicationId" "$CONFIG" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
 
