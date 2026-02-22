@@ -436,7 +436,7 @@ jobs:
           ./scripts/generate-changelog.sh --dry-run
 
       - name: Rename APK files
-        if: (!inputs.publish_to_play_store || inputs.also_build_apk) || inputs.build_type == 'debug' || inputs.build_type == 'both'
+        if: ${{ (!inputs.publish_to_play_store || inputs.also_build_apk) || inputs.build_type == 'debug' || inputs.build_type == 'both' }}
         run: |
           mkdir -p artifacts
           if [ -f "${{ steps.config.outputs.debug_apk }}" ]; then
@@ -456,7 +456,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Release APK artifact
-        if: !inputs.publish_to_play_store || inputs.also_build_apk
+        if: ${{ !inputs.publish_to_play_store || inputs.also_build_apk }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
