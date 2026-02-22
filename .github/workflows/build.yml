@@ -95,6 +95,27 @@ on:
         type: string
         required: false
         default: 'complete'
+    secrets:
+      KEYSTORE_BASE64:
+        required: true
+      KEYSTORE_PASSWORD:
+        required: true
+      KEY_ALIAS:
+        required: true
+      KEY_PASSWORD:
+        required: true
+      FEISHU_WEBHOOK:
+        required: false
+      MAVEN_USERNAME:
+        required: false
+      MAVEN_PASSWORD:
+        required: false
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
+      SECRETS_PROPERTIES_BASE64:
+        required: false
+      GOOGLE_SERVICES_JSON_BASE64:
+        required: false
 
 env:
   JAVA_VERSION: '17'
