@@ -695,6 +695,35 @@ jobs:
           userFraction: ${{ steps.rollout.outputs.fraction }}
           whatsNewDirectory: distribution/whatsnew
 
+      - name: Collect release notes
+        id: release_notes
+        if: inputs.publish_to_play_store
+        run: |
+          # 优先读 whatsnew-zh-CN，其次 whatsnew-en-US
+          NOTES=""
+          if [ -f "distribution/whatsnew/whatsnew-zh-CN" ]; then
+            NOTES=$(cat distribution/whatsnew/whatsnew-zh-CN | head -20)
+          elif [ -f "distribution/whatsnew/whatsnew-en-US" ]; then
+            NOTES=$(cat distribution/whatsnew/whatsnew-en-US | head -20)
+          fi
+
+          # 为空则从 git log 生成
+          if [ -z "$NOTES" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              NOTES=$(git log --oneline --no-merges "${PREV_TAG}..HEAD" | head -10)
+            else
+              NOTES=$(git log --oneline --no-merges -10)
+            fi
+          fi
+
+          # 写入 output（处理多行）
+          {
+            echo "notes<<NOTES_EOF"
+            echo "$NOTES"
+            echo "NOTES_EOF"
+          } >> $GITHUB_OUTPUT
+
       - name: Upload APK to file hosting
         id: upload
         if: always() && !cancelled()
@@ -739,6 +768,30 @@ jobs:
           VERSION_NAME="${{ steps.version.outputs.version_name }}"
           VERSION_CODE="${{ steps.version.outputs.version_code }}"
           BUILD_TIME="${{ steps.version.outputs.build_time }}"
+          PUBLISH_GP="${{ inputs.publish_to_play_store }}"
+          GP_TRACK="${{ inputs.play_store_track }}"
+          ROLLOUT="${{ steps.rollout.outputs.fraction }}"
+
+          # 构建发版信息块（GP 上传成功时）
+          GP_SECTION=""
+          if [ "$PUBLISH_GP" = "true" ]; then
+            RELEASE_NOTES=$(cat <<'NOTES_INNER'
+          ${{ steps.release_notes.outputs.notes }}
+          NOTES_INNER
+            )
+            # 去除前后空白行
+            RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed '/^[[:space:]]*$/d')
+            # 转义双引号和换行
+            RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+
+            ROLLOUT_INFO=""
+            if [ -n "$ROLLOUT" ] && [ "$ROLLOUT" != "1" ]; then
+              ROLLOUT_PCT=$(echo "$ROLLOUT * 100" | bc | sed 's/\.00$//')
+              ROLLOUT_INFO=" (${ROLLOUT_PCT}% 灰度)"
+            fi
+
+            GP_SECTION=",{\"tag\": \"hr\"},{\"tag\": \"div\", \"text\": {\"tag\": \"lark_md\", \"content\": \"**发版信息**\n• 轨道: ${GP_TRACK}${ROLLOUT_INFO}\n• 改动说明:\n${RELEASE_NOTES}\"}}"
+          fi
 
           if [ -n "$DOWNLOAD_URL" ] && [[ "$DOWNLOAD_URL" == http* ]]; then
             QR_CODE_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${DOWNLOAD_URL}"
@@ -755,6 +808,7 @@ jobs:
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": "**下载链接（1小时有效）**\n[点击查看二维码](${QR_CODE_URL})"}},
                 {"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "📥 下载 APK"}, "type": "primary", "url": "${DOWNLOAD_URL}"}]}
+                ${GP_SECTION}
               ]
             }
           }
@@ -772,6 +826,7 @@ jobs:
                 {"tag": "div", "text": {"tag": "lark_md", "content": "**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}"}},
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": "**APK 下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts"}}
+                ${GP_SECTION}
               ]
             }
           }
