@@ -126,7 +126,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-xlarge
 
     steps:
       - name: Checkout code
@@ -223,6 +223,7 @@ jobs:
         run: |
           mkdir -p app/src/prod
           printf '%s' "$GS_B64" | base64 -d > app/src/prod/google-services.json
+          cp app/src/prod/google-services.json app/google-services.json
           echo "✅ google-services.json decoded: $(wc -c < app/src/prod/google-services.json) bytes"
 
       - name: Print release configuration (pre-build)
