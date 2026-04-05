@@ -338,8 +338,7 @@ jobs:
         env:
           ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        run: ./gradlew ${{ steps.config.outputs.debug_task }} --max-workers=2 -Dorg.gradle.jvmargs="-Xmx4g"
-
+        run: ./gradlew ${{ steps.config.outputs.debug_task }}
       - name: Build Release APK
         if: |
           (inputs.build_type == 'release' || inputs.build_type == 'both' || inputs.build_type == '') &&
@@ -352,8 +351,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        run: ./gradlew ${{ steps.config.outputs.release_task }} --max-workers=2 -Dorg.gradle.jvmargs="-Xmx4g"
-
+        run: ./gradlew ${{ steps.config.outputs.release_task }}
       - name: Build Release AAB (for Google Play)
         if: inputs.publish_to_play_store || inputs.build_type == 'aab'
         env:
@@ -363,8 +361,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           ORG_GRADLE_PROJECT_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           ORG_GRADLE_PROJECT_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        run: ./gradlew ${{ steps.config.outputs.aab_task }} --max-workers=2 -Dorg.gradle.jvmargs="-Xmx4g"
-
+        run: ./gradlew ${{ steps.config.outputs.aab_task }}
       - name: Get version info
         id: version
         run: |
