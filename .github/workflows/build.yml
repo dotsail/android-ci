@@ -723,35 +723,45 @@ jobs:
             echo "NOTES_EOF"
           } >> $GITHUB_OUTPUT
 
-      - name: Upload APK to file hosting
+      - name: Upload files to file hosting
         id: upload
         if: always() && !cancelled()
         run: |
-          APK_FILE="artifacts/${{ inputs.app_name }}-v${{ steps.version.outputs.version_name }}-release.apk"
-          if [ -f "$APK_FILE" ]; then
+          upload_file() {
+            local FILE="$1"
+            local LABEL="$2"
+            local OUTPUT_KEY="$3"
+            if [ ! -f "$FILE" ]; then
+              echo "⚠️ $LABEL file not found: $FILE"
+              echo "${OUTPUT_KEY}=" >> $GITHUB_OUTPUT
+              return
+            fi
+            local DOWNLOAD_URL=""
             for i in 1 2 3; do
-              echo "📤 上传尝试 $i/3..."
-              RESPONSE=$(curl --connect-timeout 30 --max-time 300 -F "file=@${APK_FILE}" https://tmpfiles.org/api/v1/upload 2>/dev/null)
+              echo "📤 上传 $LABEL 尝试 $i/3..."
+              RESPONSE=$(curl --connect-timeout 30 --max-time 300 -F "file=@${FILE}" https://tmpfiles.org/api/v1/upload 2>/dev/null)
               RAW_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
               if [ -n "$RAW_URL" ]; then
                 DOWNLOAD_URL=$(echo "$RAW_URL" | sed 's|tmpfiles.org/|tmpfiles.org/dl/|')
-                echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
-                echo "✅ APK uploaded: $DOWNLOAD_URL"
-                break
+                echo "${OUTPUT_KEY}=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+                echo "✅ $LABEL uploaded: $DOWNLOAD_URL"
+                return
               fi
               if [ $i -lt 3 ]; then
                 echo "⚠️ 上传失败，10秒后重试..."
                 sleep 10
               fi
             done
-            if [ -z "$DOWNLOAD_URL" ] || [[ "$DOWNLOAD_URL" != http* ]]; then
-              echo "⚠️ Failed to upload APK after 3 attempts"
-              echo "download_url=" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "⚠️ APK file not found"
-            echo "download_url=" >> $GITHUB_OUTPUT
-          fi
+            echo "⚠️ Failed to upload $LABEL after 3 attempts"
+            echo "${OUTPUT_KEY}=" >> $GITHUB_OUTPUT
+          }
+
+          # Upload APK
+          upload_file "artifacts/${{ inputs.app_name }}-v${{ steps.version.outputs.version_name }}-release.apk" "APK" "download_url"
+
+          # Upload AAB
+          AAB_FILE=$(ls ${{ steps.config.outputs.aab_path }} 2>/dev/null | head -1)
+          upload_file "${AAB_FILE:-not_found}" "AAB" "aab_download_url"
 
       - name: Notify Feishu
         if: always() && !cancelled() && !failure() && inputs.notify_feishu
@@ -764,6 +774,7 @@ jobs:
           fi
 
           DOWNLOAD_URL="${{ steps.upload.outputs.download_url }}"
+          AAB_DOWNLOAD_URL="${{ steps.upload.outputs.aab_download_url }}"
           VERSION_NAME="${{ steps.version.outputs.version_name }}"
           VERSION_CODE="${{ steps.version.outputs.version_code }}"
           BUILD_TIME="${{ steps.version.outputs.build_time }}"
@@ -778,9 +789,7 @@ jobs:
           ${{ steps.release_notes.outputs.notes }}
           NOTES_INNER
             )
-            # 去除前后空白行
             RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed '/^[[:space:]]*$/d')
-            # 转义双引号和换行
             RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
 
             ROLLOUT_INFO=""
@@ -792,8 +801,34 @@ jobs:
             GP_SECTION=",{\"tag\": \"hr\"},{\"tag\": \"div\", \"text\": {\"tag\": \"lark_md\", \"content\": \"**发版信息**\n• 轨道: ${GP_TRACK}${ROLLOUT_INFO}\n• 改动说明:\n${RELEASE_NOTES}\"}}"
           fi
 
+          # 构建下载按钮区块
+          DOWNLOAD_BUTTONS=""
+          DOWNLOAD_INFO=""
+          HAS_DOWNLOAD=false
+
           if [ -n "$DOWNLOAD_URL" ] && [[ "$DOWNLOAD_URL" == http* ]]; then
             QR_CODE_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${DOWNLOAD_URL}"
+            DOWNLOAD_INFO="**下载链接（1小时有效）**\n[点击查看 APK 二维码](${QR_CODE_URL})"
+            DOWNLOAD_BUTTONS="{\"tag\": \"button\", \"text\": {\"tag\": \"plain_text\", \"content\": \"📥 下载 APK\"}, \"type\": \"primary\", \"url\": \"${DOWNLOAD_URL}\"}"
+            HAS_DOWNLOAD=true
+          fi
+
+          if [ -n "$AAB_DOWNLOAD_URL" ] && [[ "$AAB_DOWNLOAD_URL" == http* ]]; then
+            AAB_QR_CODE_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${AAB_DOWNLOAD_URL}"
+            if [ -n "$DOWNLOAD_INFO" ]; then
+              DOWNLOAD_INFO="${DOWNLOAD_INFO}\n[点击查看 AAB 二维码](${AAB_QR_CODE_URL})"
+            else
+              DOWNLOAD_INFO="**下载链接（1小时有效）**\n[点击查看 AAB 二维码](${AAB_QR_CODE_URL})"
+            fi
+            if [ -n "$DOWNLOAD_BUTTONS" ]; then
+              DOWNLOAD_BUTTONS="${DOWNLOAD_BUTTONS},{\"tag\": \"button\", \"text\": {\"tag\": \"plain_text\", \"content\": \"📦 下载 AAB\"}, \"type\": \"default\", \"url\": \"${AAB_DOWNLOAD_URL}\"}"
+            else
+              DOWNLOAD_BUTTONS="{\"tag\": \"button\", \"text\": {\"tag\": \"plain_text\", \"content\": \"📦 下载 AAB\"}, \"type\": \"primary\", \"url\": \"${AAB_DOWNLOAD_URL}\"}"
+            fi
+            HAS_DOWNLOAD=true
+          fi
+
+          if [ "$HAS_DOWNLOAD" = true ]; then
             cat > /tmp/feishu_payload.json << PAYLOAD_EOF
           {
             "msg_type": "interactive",
@@ -805,8 +840,8 @@ jobs:
               "elements": [
                 {"tag": "div", "text": {"tag": "lark_md", "content": "**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}"}},
                 {"tag": "hr"},
-                {"tag": "div", "text": {"tag": "lark_md", "content": "**下载链接（1小时有效）**\n[点击查看二维码](${QR_CODE_URL})"}},
-                {"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "📥 下载 APK"}, "type": "primary", "url": "${DOWNLOAD_URL}"}]}
+                {"tag": "div", "text": {"tag": "lark_md", "content": "${DOWNLOAD_INFO}"}},
+                {"tag": "action", "actions": [${DOWNLOAD_BUTTONS}]}
                 ${GP_SECTION}
               ]
             }
@@ -824,7 +859,7 @@ jobs:
               "elements": [
                 {"tag": "div", "text": {"tag": "lark_md", "content": "**版本信息**\n• Version: ${VERSION_NAME} (${VERSION_CODE})\n• 构建时间: ${BUILD_TIME}\n• 分支: ${{ github.ref_name }}"}},
                 {"tag": "hr"},
-                {"tag": "div", "text": {"tag": "lark_md", "content": "**APK 下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts"}}
+                {"tag": "div", "text": {"tag": "lark_md", "content": "**下载链接不可用**\n请前往 [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 下载 Artifacts"}}
                 ${GP_SECTION}
               ]
             }
